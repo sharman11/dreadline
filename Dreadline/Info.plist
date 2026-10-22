@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleDisplayName</key><string>Dreadline</string>
+<key>CFBundleName</key><string>Dreadline</string>
+<key>CFBundleIdentifier</key><string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+<key>CFBundleExecutable</key><string>$(EXECUTABLE_NAME)</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleShortVersionString</key><string>0.1.0</string>
+<key>CFBundleVersion</key><string>1</string>
+<key>LSMinimumSystemVersion</key><string>14.0</string>
+<key>LSUIElement</key><true/>
+<key>NSPrincipalClass</key><string>NSApplication</string>
+<key>NSCalendarsFullAccessUsageDescription</key><string>Dreadline reads events in the calendars you select to show persistent reminders. macOS requires full calendar access for reading; Dreadline never edits calendar events.</string>
+<key>NSRemindersFullAccessUsageDescription</key><string>Dreadline reads incomplete reminders in lists you select. It marks an item complete only when you press Done.</string>
+<key>NSRemindersUsageDescription</key><string>Read selected reminder lists and complete a reminder only after you press Done.</string>
+</dict></plist>
