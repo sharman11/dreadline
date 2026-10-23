@@ -9,7 +9,14 @@ def add(name, value): objects[ident(name)] = value; return ident(name)
 def arr(ids): return '(' + ', '.join(ids) + ',)'
 sources = sorted(root.glob('Dreadline/**/*.swift'))
 tests = sorted(root.glob('DreadlineTests/*.swift'))
-app_builds=[]; test_builds=[]; files=[]
+app_builds=[]; test_builds=[]; files=[]; resource_builds=[]
+for path in sorted(root.glob('Dreadline/Resources/*')):
+    if not path.is_file(): continue
+    rel = str(path.relative_to(root))
+    file_type = {'.wav': 'audio.wav', '.mp3': 'audio.mp3', '.m4a': 'file', '.webp': 'file', '.png': 'image.png', '.pdf': 'image.pdf', '.icns': 'image.icns'}.get(path.suffix, 'file')
+    f = add(rel, '{isa = PBXFileReference; lastKnownFileType = '+file_type+'; path = "'+rel+'"; sourceTree = "<group>";}')
+    files.append(f)
+    resource_builds.append(add('resource-'+rel, '{isa = PBXBuildFile; fileRef = '+f+';}'))
 for path in sources + tests:
     rel = str(path.relative_to(root)); f = add(rel, '{isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "'+rel+'"; sourceTree = "<group>";}'); files.append(f)
     if path in sources:
@@ -30,11 +37,12 @@ def configs(name, extra):
         ids.append(add(name+mode,'{isa = XCBuildConfiguration; name = '+mode+'; buildSettings = {'+settings+'};}'))
     return add(name+'configs','{isa = XCConfigurationList; buildConfigurations = '+arr(ids)+'; defaultConfigurationIsVisible = 0; defaultConfigurationName = Release;}')
 proj_configs=configs('project','')
-app_configs=configs('app','PRODUCT_NAME = Dreadline; PRODUCT_BUNDLE_IDENTIFIER = xyz.dreadline.app; INFOPLIST_FILE = Dreadline/Info.plist; CODE_SIGN_ENTITLEMENTS = Dreadline/Dreadline.entitlements; CODE_SIGN_STYLE = Automatic; ENABLE_APP_SANDBOX = YES; ENABLE_HARDENED_RUNTIME = YES; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks"; OTHER_LDFLAGS = "-lsqlite3";')
+app_configs=configs('app','PRODUCT_NAME = Dreadline; PRODUCT_BUNDLE_IDENTIFIER = xyz.dreadline.app; INFOPLIST_FILE = Dreadline/Info.plist; CODE_SIGN_ENTITLEMENTS = Dreadline/Dreadline.entitlements; CODE_SIGN_STYLE = Automatic; ENABLE_APP_SANDBOX = NO; ENABLE_HARDENED_RUNTIME = YES; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks"; OTHER_LDFLAGS = "-lsqlite3";')
 test_configs=configs('test','PRODUCT_NAME = DreadlineTests; PRODUCT_BUNDLE_IDENTIFIER = xyz.dreadline.tests; GENERATE_INFOPLIST_FILE = YES; CODE_SIGN_STYLE = Automatic; OTHER_LDFLAGS = "-lsqlite3";')
 app_sources=add('app-sources','{isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = '+arr(app_builds)+'; runOnlyForDeploymentPostprocessing = 0;}')
 test_sources=add('test-sources','{isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = '+arr(test_builds)+'; runOnlyForDeploymentPostprocessing = 0;}')
-app_target=add('app-target','{isa = PBXNativeTarget; name = Dreadline; productName = Dreadline; productType = "com.apple.product-type.application"; productReference = '+app_product+'; buildConfigurationList = '+app_configs+'; buildPhases = '+arr([app_sources])+'; buildRules = (); dependencies = ();}')
+app_resources=add('app-resources','{isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = '+arr(resource_builds)+'; runOnlyForDeploymentPostprocessing = 0;}')
+app_target=add('app-target','{isa = PBXNativeTarget; name = Dreadline; productName = Dreadline; productType = "com.apple.product-type.application"; productReference = '+app_product+'; buildConfigurationList = '+app_configs+'; buildPhases = '+arr([app_sources,app_resources])+'; buildRules = (); dependencies = ();}')
 test_target=add('test-target','{isa = PBXNativeTarget; name = DreadlineTests; productName = DreadlineTests; productType = "com.apple.product-type.bundle.unit-test"; productReference = '+test_product+'; buildConfigurationList = '+test_configs+'; buildPhases = '+arr([test_sources])+'; buildRules = (); dependencies = ();}')
 project=add('project','{isa = PBXProject; attributes = {BuildIndependentTargetsInParallel = YES; LastUpgradeCheck = 2710;}; buildConfigurationList = '+proj_configs+'; compatibilityVersion = "Xcode 14.0"; developmentRegion = en; knownRegions = (en, Base); mainGroup = '+group+'; productRefGroup = '+products+'; projectDirPath = ""; projectRoot = ""; targets = '+arr([app_target,test_target])+';}')
 (root/'Dreadline.xcodeproj/project.pbxproj').write_text('// !$*UTF8*$!\n{archiveVersion = 1; classes = {}; objectVersion = 56; objects = {\n'+'\n'.join(k+' = '+v+';' for k,v in objects.items())+'\n}; rootObject = '+project+';}\n')

@@ -1,5 +1,19 @@
 # Architecture
 
+## Menu-bar presentation
+
+`MenuBarController` owns the status item and a non-detachable transient popover.
+Until setup is complete (calendar access, a chosen calendar, Accessibility and
+notifications), every entry point opens the onboarding window instead. The
+popover sizes itself to the agenda (360 points wide, scrolling past 440 points).
+The popover hosts the complete agenda, history, local reminders, inline reminder
+editor and timing overrides. `AppModel.showMain()` routes notification and alert
+View meeting actions back to this popover. There is no standalone agenda scene.
+A single retained Settings window opens from the gear or Settings command and
+is reused after closing. `AppDelegate` owns the model and controller from launch,
+so scheduling and quit cleanup work before the popover is first opened.
+
+
 ## Boundaries
 
 - `Core/Domain.swift`: immutable/value occurrence snapshots, preferences, recurrence rules, states, retention.
@@ -13,7 +27,7 @@
 - `Presentation/OverlayCoordinator.swift`: owned panels/dim windows, screen selection, display changes, sound, focus policy, and SwiftUI host updates.
 - `Views/`: source selection, onboarding, editors, list/history, settings, menu, diagnostics.
 
-No private API, input interception, screen recording, Automation, Accessibility permission, network client, helper, or source calendar writes are used.
+Public Accessibility window attributes are used for actual minimize/restore. The direct-download build is not sandboxed. No private API, input interception, screen recording, Apple Events automation, network client, helper, or source calendar writes are used.
 
 ## Occurrence identity
 

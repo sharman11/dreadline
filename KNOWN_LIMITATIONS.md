@@ -23,7 +23,16 @@
 
 - SQLite schema version 1 stores an encoded transactional state snapshot, not a separate relational row for every occurrence. Future incompatible versions fail closed. Tests simulate commit failure and corrupt stores; real disk-full hardware faults and interrupted migrations are not manually reproduced.
 - Failed databases are retained until explicit recovery. Reset/recovery does not undo an Apple Reminder completion that the user already performed at its source.
-- Build output is universal and ad hoc signed with sandbox/privacy entitlements retained. It is not Developer ID signed or notarized; hardened runtime is disabled by Xcode for ad hoc debug signing. Release settings enable hardened runtime. A stable Apple Development/Developer ID team and identity are still needed for reliable TCC, launch-at-login, and distribution verification.
+- Build output is universal and ad hoc signed with App Sandbox disabled for Accessibility window control. It is not Developer ID signed or notarized; hardened runtime is disabled by Xcode for ad hoc debug signing. Release settings enable hardened runtime. A stable Apple Development/Developer ID team and identity are still needed for reliable TCC, launch-at-login, and distribution verification.
 - This host's Xcode emits unrelated CoreDevice/iOS Simulator version-mismatch diagnostics. The macOS app build and host XCTest run work. Intel was compiled but tests ran on the Apple Silicon host; macOS 14 itself was not available for runtime checks.
 - UI automation inspected the main window, source-denied mode, preview opt-in controls, local creation/completion, and accurate history. The borderless demo panel itself was not exposed by the automation surface, so its visual fullscreen geometry and panel-specific keyboard routing remain manual checks. Escape cancellation was verified through the app and its running-preview state. No live-source acceptance pass is claimed.
 - No automated XCUITest target is supplied. Coordinator integration tests inject source, notification, persistence, presentation, clock, and deadline-driver fakes. UI smoke checks and unverified combinations are recorded separately.
+
+## Actual minimize/restore — 2026-10-23
+
+- Accessibility permission is required. Without it the alert can appear, but its status explicitly says windows were not minimized. The app never grants its own permission.
+- Only initially non-minimized, supported windows are changed. Fullscreen/protected windows, unresponsive apps and inaccessible window lists may be skipped. Enumeration and minimize calls have bounded timeouts.
+- Restore tracks the original window element and process launch identity, ignores closed/terminated windows, preserves existing Dock state, and retains failed restoration records for Retry. Restore windows is available in Settings and the menu-bar panel.
+- Normal Escape, Pause, release, Quit, sleep/session changes and display changes run restoration. Force Quit/crash cannot run cleanup; in that case affected windows may need to be restored manually from the Dock. Restoration is not guaranteed after permission revocation; re-enable permission and use Restore windows while Dreadline is still running.
+- Existing sandbox-container state is reused if present. Ad hoc rebuilds can require granting Accessibility again; stable signing is required for dependable release permissions.
+- Live cross-app minimization has not been certified on this host because Dreadline has not been granted Accessibility during automated work. Tests use isolated fake window controls.

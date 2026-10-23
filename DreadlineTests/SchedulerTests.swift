@@ -20,8 +20,24 @@ final class SchedulerTests: XCTestCase {
     }
     func database(_ items: [Occurrence]) -> Database {
         var db = Database(); db.occurrences = items; db.preferences.alertsEnabled = true
+        db.preferences.timing = Timing(); db.preferences.ceiling = .prominent; db.preferences.fullscreenEnabled = false; db.preferences.poltergeistEnabled = false
         return db
     }
+    func testDefaultHauntingHasPreludeThenMeetingAlert() {
+        let clock = FakeClock(start - 301)
+        var engine = Scheduler(clock: clock)
+        var db = Database(); db.preferences.alertsEnabled = true; db.occurrences = [item()]
+        XCTAssertEqual(engine.evaluate(&db, gates: DeliveryGates())?.phase, .dash, "The ghost dashes 10 s before the early warning")
+        clock.advance(1)
+        XCTAssertEqual(engine.evaluate(&db, gates: DeliveryGates())?.phase, .prelude)
+        clock.advance(Haunt.preludeSeconds)
+        XCTAssertNil(engine.evaluate(&db, gates: DeliveryGates()))
+        clock.advance(296)
+        XCTAssertEqual(engine.evaluate(&db, gates: DeliveryGates())?.intensity, .fullscreen)
+        clock.advance(30)
+        XCTAssertEqual(engine.evaluate(&db, gates: DeliveryGates())?.intensity, .prominent)
+    }
+
     func testOrderedEscalationCeilingAndCoincidentStages() throws {
         let clock = FakeClock(start - 601); var engine = Scheduler(clock: clock); var db = database([item()])
         XCTAssertNil(engine.evaluate(&db, gates: DeliveryGates()))
@@ -240,5 +256,81 @@ extension SchedulerTests {
         let delivery = engine.evaluate(&db, gates: DeliveryGates())
         XCTAssertEqual(delivery?.intensity, .fullscreen)
         XCTAssertEqual(delivery?.items.map(\.id), [high.id])
+    }
+
+    // Regression: a dismissed meeting that moves to a new time must alert again.
+    func testRescheduledMeetingAfterDismissAlertsAgain() throws {
+        var meeting = item(.calendar); meeting.providerID = "evt"
+        var db = database([meeting]); db.preferences.selectedCalendars = ["cal"]
+        var engine = Scheduler(clock: FakeClock(start)); try engine.apply(.acknowledge, id: meeting.id, to: &db)
+        var moved = meeting; moved.id = UUID(); moved.due = start + 7200; moved.end = start + 9000
+        Reconciler.merge(result([moved]), into: &db, now: start + 60)
+        XCTAssertEqual(db.occurrences.count, 1)
+        XCTAssertEqual(db.occurrences[0].id, meeting.id)
+        XCTAssertEqual(db.occurrences[0].state, .scheduled)
+        XCTAssertNil(db.occurrences[0].resolvedAt)
+        let later = Scheduler(clock: FakeClock(start + 7200))
+        var laterEngine = later
+        var gates = DeliveryGates(); gates.validated = [.local, .calendar]
+        XCTAssertNotNil(laterEngine.evaluate(&db, gates: gates))
+    }
+    func testSameTimeRefetchKeepsDismissal() throws {
+        var meeting = item(.calendar, offset: 3600); meeting.providerID = "evt"
+        var db = database([meeting]); db.preferences.selectedCalendars = ["cal"]
+        var engine = Scheduler(clock: FakeClock(start)); try engine.apply(.acknowledge, id: meeting.id, to: &db)
+        Reconciler.merge(result([meeting]), into: &db, now: start + 1)
+        XCTAssertEqual(db.occurrences[0].state, .acknowledged)
+    }
+    func testSystemCancelledItemIsRevivedWhenItReappears() {
+        var meeting = item(.calendar, offset: 3600); meeting.providerID = "evt"
+        var db = database([meeting]); db.preferences.selectedCalendars = ["cal"]
+        Reconciler.merge(result([], sources: false), into: &db, now: start)
+        XCTAssertEqual(db.occurrences[0].state, .cancelled)
+        Reconciler.merge(result([meeting]), into: &db, now: start + 60)
+        XCTAssertEqual(db.occurrences[0].state, .scheduled)
+        XCTAssertNil(db.occurrences[0].outcome)
+    }
+    // Regression: snooze time must keep counting while the Mac sleeps.
+    func testSystemClockCountsSleep() {
+        // CLOCK_MONOTONIC_RAW is mach_continuous_time: it includes sleep, unlike systemUptime.
+        XCTAssertGreaterThanOrEqual(SystemClock().uptime, ProcessInfo.processInfo.systemUptime - 1)
+    }
+    func testSnoozeEndsAfterSleep() throws {
+        let clock = FakeClock(start)
+        var engine = Scheduler(clock: clock)
+        var db = database([item()])
+        _ = engine.evaluate(&db, gates: DeliveryGates())
+        try engine.apply(.snooze(start + 300), id: db.occurrences[0].id, to: &db)
+        clock.advance(7200) // two hours asleep: wall and continuous time both advance
+        XCTAssertNotNil(engine.evaluate(&db, gates: DeliveryGates(), catchUp: true))
+        XCTAssertNotEqual(db.occurrences[0].state, .snoozed)
+    }
+    func testSkippedMeetingStaysSkippedWhenMoved() throws {
+        var meeting = item(.calendar, offset: 3600); meeting.providerID = "evt"
+        var db = database([meeting]); db.preferences.selectedCalendars = ["cal"]
+        var engine = Scheduler(clock: FakeClock(start)); try engine.apply(.skip, id: meeting.id, to: &db)
+        var moved = meeting; moved.due = start + 7200
+        Reconciler.merge(result([moved]), into: &db, now: start + 1)
+        XCTAssertEqual(db.occurrences[0].state, .skipped)
+    }
+    func testSnoozeStillEndsOnMonotonicTimeWhenClockMovesBack() throws {
+        let clock = FakeClock(start)
+        var engine = Scheduler(clock: clock)
+        var db = database([item()])
+        _ = engine.evaluate(&db, gates: DeliveryGates())
+        try engine.apply(.snooze(start + 300), id: db.occurrences[0].id, to: &db)
+        XCTAssertEqual(engine.nextDeadline(db), start + 300)
+        clock.now -= 100; clock.uptime += 301 // wall clock set back
+        XCTAssertNotNil(engine.evaluate(&db, gates: DeliveryGates()))
+    }
+    func testExpiredSnoozeBeforeFirstAlertReturnsToScheduled() throws {
+        let clock = FakeClock(start)
+        var engine = Scheduler(clock: clock)
+        var db = database([item(offset: 86400)])
+        try engine.apply(.snooze(start + 300), id: db.occurrences[0].id, to: &db)
+        clock.advance(301)
+        XCTAssertNil(engine.evaluate(&db, gates: DeliveryGates()))
+        XCTAssertEqual(db.occurrences[0].state, .scheduled)
+        XCTAssertNil(db.occurrences[0].snoozeUntil)
     }
 }

@@ -44,7 +44,142 @@ final class FakePresenter: PresentationSink {
     func close() { closes += 1; current = nil }
 }
 @MainActor
+final class DeferringPresenter: PresentationSink {
+    var current: Presentation?
+    var farewells: [HauntFarewell] = []
+    private var pending: (@MainActor () -> Void)?
+    func present(_ presentation: Presentation?, demo: Bool) { current = presentation }
+    func close() { current = nil }
+    func farewell(_ kind: HauntFarewell, then: @escaping @MainActor () -> Void) { farewells.append(kind); pending = then }
+    func finish() { let next = pending; pending = nil; next?() }
+}
+@MainActor
 final class IntegrationTests: XCTestCase {
+    func testCompletedOneOffLeavesActiveRemindersWhileRepeatingReminderStays() throws {
+        let (model, _, _, _, _, clock) = fixture()
+        let oneOff = LocalReminder(title: "One off", due: clock.now + 3600)
+        model.addOrEdit(oneOff)
+        XCTAssertTrue(model.activeLocalReminders.contains { $0.id == oneOff.id })
+        let occurrence = try XCTUnwrap(model.unresolved.first { $0.seriesID == oneOff.id })
+        model.act(.done, occurrence)
+        XCTAssertFalse(model.activeLocalReminders.contains { $0.id == oneOff.id })
+        XCTAssertTrue(model.history.contains { $0.id == occurrence.id })
+
+        var repeating = LocalReminder(title: "Repeating", due: clock.now + 7200)
+        repeating.recurrence.frequency = .daily
+        model.addOrEdit(repeating)
+        let repeatOccurrence = try XCTUnwrap(model.unresolved.first { $0.seriesID == repeating.id })
+        model.act(.done, repeatOccurrence)
+        XCTAssertTrue(model.activeLocalReminders.contains { $0.id == repeating.id })
+        XCTAssertTrue(model.unresolved.contains { $0.seriesID == repeating.id && $0.id != repeatOccurrence.id })
+    }
+
+    // Regression: editing a repeating reminder keeps its pending occurrence instead of reverting to the first date.
+    func testEditingRepeatingSeriesTitleKeepsPendingDueTime() throws {
+        let (model, _, _, _, _, clock) = fixture()
+        var series = LocalReminder(title: "Stretch", due: clock.now + 3600)
+        series.recurrence.frequency = .daily
+        model.addOrEdit(series)
+        let pendingDue = try XCTUnwrap(model.unresolved.first { $0.seriesID == series.id }?.due)
+        clock.now += 86400 * 3
+        model.addOrEdit({ var edit = series; edit.title = "Stretch more"; return edit }())
+        let active = model.unresolved.filter { $0.seriesID == series.id }
+        XCTAssertEqual(active.count, 1)
+        XCTAssertEqual(active[0].title, "Stretch more")
+        XCTAssertEqual(active[0].due, pendingDue)
+    }
+    func testChangingScheduleOfStartedSeriesBeginsAtNextFutureDate() throws {
+        let (model, _, _, _, _, clock) = fixture()
+        var series = LocalReminder(title: "Water plants", due: clock.now + 60)
+        series.recurrence.frequency = .daily
+        model.addOrEdit(series)
+        clock.now += 86400 * 3
+        var edit = series; edit.recurrence.frequency = .weekly
+        model.addOrEdit(edit)
+        let due = try XCTUnwrap(model.unresolved.first { $0.seriesID == series.id }?.due)
+        XCTAssertGreaterThan(due, clock.now)
+    }
+    func testSnoozeUsesPreferredLength() throws {
+        let (model, _, _, _, _, clock) = fixture()
+        var local = LocalReminder(title: "Call back", due: clock.now)
+        local.snoozeMinutes = 20
+        model.addOrEdit(local)
+        let item = try XCTUnwrap(model.unresolved.first)
+        XCTAssertEqual(model.snoozeLabel(item), "Snooze 20 min")
+        model.escape(item)
+        let until = try XCTUnwrap(model.db.occurrences.first { $0.id == item.id }?.snoozeUntil)
+        XCTAssertEqual(until.timeIntervalSinceNow, 1200, accuracy: 5)
+        var p = model.preferences; p.snoozeMinutes = 10; model.updatePreferences(p)
+        XCTAssertEqual(model.snoozeInterval(event(clock.now)), 600)
+    }
+    // Regression: a routine refresh (menu click, timer, sync) must not tear down an alert on screen.
+    func testRoutineRefreshKeepsVisibleAlert() async {
+        let (model, _, source, _, presenter, clock) = fixture()
+        var p = model.preferences; p.selectedCalendars = ["c"]; model.updatePreferences(p)
+        source.results[.calendar] = calendarResult([event(clock.now)])
+        await model.refresh(catchUp: false)
+        XCTAssertEqual(presenter.current?.items.count, 1)
+        let closes = presenter.closes
+        await model.refresh(catchUp: false)
+        model.scheduleRefresh()
+        XCTAssertEqual(presenter.closes, closes)
+        XCTAssertEqual(presenter.current?.items.count, 1)
+    }
+    func testOverlayDismissAppliesOnlyAfterTheWarningFinishes() throws {
+        let presenter = DeferringPresenter(), memory = MemoryStore(), clock = FakeClock(Date())
+        memory.db.preferences.alertsEnabled = true
+        let model = AppModel(store: memory, source: FakeSource(), notificationSink: FakeNotifications(), presentationSink: presenter, startServices: false, clock: clock)
+        model.addOrEdit(LocalReminder(title: "Haunted", due: clock.now))
+        let item = try XCTUnwrap(model.unresolved.first)
+        model.dismissFromOverlay(item)
+        XCTAssertEqual(presenter.farewells, [.dismiss])
+        XCTAssertFalse(model.db.occurrences[0].state.terminal, "The action waits for the exit to play")
+        presenter.finish()
+        XCTAssertEqual(model.db.occurrences[0].state, .acknowledged)
+    }
+    func testOverlaySnoozeAppliesOnlyAfterTheFlickerWarning() throws {
+        let presenter = DeferringPresenter(), memory = MemoryStore(), clock = FakeClock(Date())
+        memory.db.preferences.alertsEnabled = true
+        let model = AppModel(store: memory, source: FakeSource(), notificationSink: FakeNotifications(), presentationSink: presenter, startServices: false, clock: clock)
+        model.addOrEdit(LocalReminder(title: "Haunted", due: clock.now))
+        let item = try XCTUnwrap(model.unresolved.first)
+        model.snoozeFromOverlay([item])
+        XCTAssertEqual(presenter.farewells, [.snooze])
+        XCTAssertNotEqual(model.db.occurrences[0].state, .snoozed)
+        presenter.finish()
+        XCTAssertEqual(model.db.occurrences[0].state, .snoozed)
+    }
+    func testJoiningItemIsKeptOffScreenDuringBrowserHandoff() {
+        let item = event(Date())
+        var other = event(Date()); other.id = UUID()
+        let presentation = Presentation(items: [item, other], intensity: .fullscreen, catchUp: false)
+        XCTAssertEqual(AppModel.excluding([item.id], from: presentation)?.items.map(\.id), [other.id])
+        XCTAssertNil(AppModel.excluding([item.id, other.id], from: presentation))
+        XCTAssertEqual(AppModel.excluding([], from: presentation), presentation)
+    }
+    func testSetupNeedsCalendarAccessACalendarWindowControlAndNotifications() async {
+        let access = FakeWorkspaceAccess(); access.trusted = false
+        let source = FakeSource(), notifications = FakeNotifications()
+        let model = AppModel(store: MemoryStore(), source: source, notificationSink: notifications, presentationSink: FakePresenter(), startServices: false, windowAccess: access)
+        XCTAssertTrue(model.calendarAccessGranted)
+        XCTAssertFalse(model.requiredSetupDone, "No calendar chosen and no window control")
+        model.setCalendar("c", selected: true)
+        XCTAssertFalse(model.requiredSetupDone, "Window control still missing")
+        model.completeSetup()
+        XCTAssertFalse(model.setupComplete, "Cannot finish while a requirement is missing")
+        access.trusted = true; model.refreshPermissions()
+        await model.refreshNotificationStatus()
+        XCTAssertFalse(model.requiredSetupDone, "Notifications still missing")
+        XCTAssertEqual(model.menuTitle, "Finish setup")
+        notifications.allowed = true
+        await model.refreshNotificationStatus()
+        XCTAssertTrue(model.requiredSetupDone)
+        model.completeSetup()
+        XCTAssertTrue(model.setupComplete)
+        XCTAssertTrue(model.preferences.alertsEnabled, "Finishing setup turns alerts on")
+        source.failures.insert(.calendar); model.refreshPermissions()
+        XCTAssertFalse(model.setupComplete, "Revoking a permission locks the app again")
+    }
     func fixture() -> (AppModel, MemoryStore, FakeSource, FakeNotifications, FakePresenter, FakeClock) {
         let memory = MemoryStore(); memory.db.preferences.alertsEnabled = true
         let source = FakeSource(), notifications = FakeNotifications(), presenter = FakePresenter(), clock = FakeClock(Date())
@@ -168,6 +303,8 @@ extension IntegrationTests {
     func testInjectedSingleDeadlineDriverAndQuitCleanup() {
         let store = MemoryStore(), source = FakeSource(), notifications = FakeNotifications(), presenter = FakePresenter(), driver = FakeDeadlineDriver(), clock = FakeClock(Date())
         store.db.preferences.alertsEnabled = true
+        store.db.preferences.timing = Timing()
+        store.db.preferences.poltergeistEnabled = false
         let model = AppModel(store: store, source: source, notificationSink: notifications, presentationSink: presenter, startServices: false, deadlineDriver: driver, clock: clock)
         model.addOrEdit(LocalReminder(title: "Future", due: clock.now + 1200))
         XCTAssertEqual(driver.deadline, clock.now + 600)
@@ -192,5 +329,27 @@ extension IntegrationTests {
             XCTAssertNil(presenter.current)
             XCTAssertEqual(restarted.db.occurrences[0].state, model.db.occurrences[0].state)
         }
+    }
+}
+
+extension IntegrationTests {
+    func testReturningFromPreludePreservesMeetingTimeAlert() {
+        let (model, _, _, _, presenter, clock) = fixture()
+        model.addOrEdit(LocalReminder(title: "Fixture", due: clock.now + 300))
+        XCTAssertEqual(presenter.current?.phase, .prelude)
+        model.stopPresentation(presenter.current!)
+        XCTAssertNil(presenter.current)
+        XCTAssertFalse(model.unresolved[0].state.terminal)
+        clock.advance(300); model.tick()
+        XCTAssertEqual(presenter.current?.intensity, .fullscreen)
+    }
+    func testDemoEndingResumesDueRemindersWithoutJump() {
+        let (model, _, _, _, presenter, clock) = fixture()
+        model.addOrEdit(LocalReminder(title: "Fixture", due: clock.now + 300))
+        model.startDemo()
+        clock.advance(300); model.tick()
+        model.endDemo()
+        XCTAssertEqual(presenter.current?.intensity, .prominent)
+        XCTAssertFalse(model.demoActive)
     }
 }

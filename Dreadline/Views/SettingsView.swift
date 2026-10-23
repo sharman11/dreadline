@@ -1,148 +1,338 @@
 import SwiftUI
 import AppKit
 
+/// Settings in four short tabs. Permissions are not here: onboarding guarantees them,
+/// and the app re-locks into onboarding if one is revoked.
 struct SettingsView: View {
     @ObservedObject var model: AppModel
-    @State private var draft = Preferences()
-    @State private var previewed = false
+    /// The demo video renders Settings without the test button.
+    var showsTest = true
     @State private var resetPrompt = false
-    @State private var pauseDate = Date().addingTimeInterval(3600)
-    @State private var tab = "Behavior"
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Settings").font(.largeTitle)
-            Picker("Section", selection: $tab) { ForEach(["Behavior", "Sources", "Privacy & system", "Diagnostics"], id: \.self) { Text($0).tag($0) } }.pickerStyle(.segmented)
-            if model.demoActive { HStack { Text("Sandbox preview running — no source writes"); Spacer(); Button("End preview") { model.endDemo() } } }
-            if tab == "Sources" { SourceSettings(model: model) }
-            else if tab == "Diagnostics" { DiagnosticsView(model: model) }
-            else {
-                Form {
-                    if tab == "Behavior" {
-                        Section("Preview before enabling real delivery") {
-                            HStack { ForEach(Intensity.allCases, id: \.self) { stage in Button("Preview \(stage.title)") { previewed = true; model.startDemo(stage) } } }
-                            Toggle("Enable real alerts from selected sources and local reminders", isOn: $draft.alertsEnabled).disabled(!previewed && !model.preferences.alertsEnabled)
-                            Picker("Intensity ceiling", selection: $draft.ceiling) { ForEach(Intensity.allCases, id: \.self) { Text($0.title).tag($0) } }
-                            Toggle("Allow fullscreen stage", isOn: $draft.fullscreenEnabled).disabled(!previewed && !model.preferences.fullscreenEnabled)
-                            Text("Overlays always allow Stop, Snooze, Skip, and Pause. Real overlays are nonactivating and redacted; full details stay in the main window.").font(.caption)
-                        }
-                        Section("Ordered lead times") { TimingControls(timing: $draft.timing) }
-                        Section("Snooze and expiry") {
-                            Stepper("Default snooze: \(draft.snoozeMinutes) min", value: $draft.snoozeMinutes, in: 1...120)
-                            TextField("Event grace (seconds)", value: $draft.grace, format: .number)
-                            TextField("Task escalation window (seconds)", value: $draft.taskWindow, format: .number)
-                            Text("Events expire at the earlier of end or grace. Tasks remain pending after escalation stops.").font(.caption)
-                        }
-                        Section("Quiet hours — current local time zone") {
-                            Toggle("Enable quiet hours", isOn: $draft.quiet.enabled)
-                            MinuteControl(title: "Start", minute: $draft.quiet.startMinute)
-                            MinuteControl(title: "End", minute: $draft.quiet.endMinute)
-                            Text("Overnight ranges are supported. Equal start/end suppresses delivery all day. Quiet hours also suppress scheduled fallback alerts.").font(.caption)
-                        }
-                        Section("Presentation mode / pause") {
-                            DatePicker("Pause until", selection: $pauseDate)
-                            Button("Pause until chosen time") { model.pause(until: pauseDate) }.disabled(pauseDate <= Date())
-                            HStack { Button("Pause indefinitely") { model.pause(until: nil) }; Button("Resume") { model.resume() } }
-                        }
-                    } else {
-                        Section("Privacy and accessibility") {
-                            Toggle("Hide titles in menu bar and app lists", isOn: $draft.privateTitles)
-                            Toggle("Dim all attached displays at fullscreen", isOn: $draft.dimAllDisplays)
-                            Toggle("Reduced motion", isOn: $draft.reducedMotion)
-                            Text("Presentations use no animated effects. System accessibility and reduced transparency settings are respected by native controls.").font(.caption)
-                            Toggle("Play a single alert sound", isOn: $draft.sound)
-                            Slider(value: $draft.volume, in: 0...1) { Text("Sound volume") }
-                            Stepper("History retention: \(draft.retentionDays) days", value: $draft.retentionDays, in: 1...365)
-                        }
-                        Section("System notifications — optional") {
-                            Text("Permission: \(model.notificationStatus)")
-                            Toggle("Fallback notifications", isOn: $draft.fallback).disabled(model.notificationStatus != "Authorized")
-                            Button("Request notification permission") { model.requestNotifications() }
-                            Text("Ordinary notifications may work while quit. They cannot show overlays, bypass Focus, or track source edits while this app is not running. At most 32 future notifications are scheduled.").font(.caption)
-                        }
-                        Section("Startup") {
-                            Text(model.loginStatus)
-                            HStack { Button("Enable launch at login") { model.setLogin(true) }; Button("Disable launch at login") { model.setLogin(false) }; Button("Refresh status") { model.updateLoginStatus() } }
-                        }
-                        Section("Local data") {
-                            Text(model.databaseURL.path).font(.caption).textSelection(.enabled)
-                            Button(model.storageFailed ? "Preserve failed database and recover…" : "Reset local data…", role: .destructive) { resetPrompt = true }
-                        }
-                    }
-                }.formStyle(.grouped)
-                HStack {
-                    Button("Restore default settings") { draft = Preferences() }
-                    Spacer()
-                    Button("Save settings") { model.endDemo(); model.updatePreferences(draft) }.disabled(!draft.timing.valid || draft.grace <= 0 || draft.taskWindow <= 0)
-                }
+    @State private var diagnostics = false
+
+    enum Tab: String, CaseIterable {
+        case general = "General", calendars = "Calendars", haunting = "Haunting", advanced = "Advanced"
+        var symbol: String {
+            switch self {
+            case .general: return "gearshape"
+            case .calendars: return "calendar"
+            case .haunting: return "theatermasks"
+            case .advanced: return "slider.horizontal.3"
             }
-            if let error = model.error { Text(error).font(.caption).foregroundStyle(.red).textSelection(.enabled) }
-        }.padding(20)
-        .onAppear { draft = model.preferences }
-        .onChange(of: model.preferences) { _, new in draft = new }
+        }
+    }
+    private var tab: Binding<Tab> {
+        Binding(get: { Tab(rawValue: model.settingsTab) ?? .general }, set: { model.settingsTab = $0.rawValue })
+    }
+
+    /// A one-line description of each scare level.
+    private var scareMeterCaption: String {
+        switch model.preferences.scareLevel ?? .medium {
+        case .low: return "A sharp shock when the meeting arrives. No screaming."
+        case .medium: return "A full scream when the meeting arrives."
+        case .high: return "Not for the faint of heart."
+        }
+    }
+    private func preference<T>(_ key: WritableKeyPath<Preferences, T>) -> Binding<T> {
+        Binding(get: { model.preferences[keyPath: key] }, set: { value in
+            var prefs = model.preferences; prefs[keyPath: key] = value; model.updatePreferences(prefs)
+        })
+    }
+    private var fullHaunting: Bool { model.preferences.fullscreenEnabled && model.preferences.ceiling == .fullscreen }
+    private var calendars: [SourceSnapshot] { model.sources.filter { $0.kind == .calendar } }
+    private var lists: [SourceSnapshot] { model.sources.filter { $0.kind == .reminders } }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            tabBar
+            Divider().overlay(AppStyle.border)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    switch tab.wrappedValue {
+                    case .general: general
+                    case .calendars: calendarsTab
+                    case .haunting: haunting
+                    case .advanced: advanced
+                    }
+                }
+                .padding(24)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(AppStyle.canvas)
+        .haunted()
+        .onAppear { model.refreshPermissions() }
+        .sheet(isPresented: $diagnostics) {
+            VStack(spacing: 0) {
+                HStack { Text("Diagnostics").font(AppStyle.display(22)); Spacer(); Button("Done") { diagnostics = false }.buttonStyle(HauntedSecondaryStyle(compact: true)) }.padding()
+                DiagnosticsView(model: model)
+            }.frame(width: 600, height: 520).haunted()
+        }
         .alert("Reset Dreadline's local data?", isPresented: $resetPrompt) {
             Button("Cancel", role: .cancel) {}
-            Button("Reset local data", role: .destructive) { model.reset(); draft = model.preferences }
-        } message: { Text("Cancel app timers and notifications, remove local reminders, history, selection, and preferences. Source calendars and Apple Reminders are untouched. Failed database files are preserved in a Recovery folder.") }
+            Button("Reset local data", role: .destructive) { model.reset() }
+        } message: { Text("This removes local reminders, activity, and preferences. Your calendars and Apple Reminders stay untouched.") }
+    }
+
+    private var tabBar: some View {
+        HStack(spacing: 4) {
+            ForEach(Tab.allCases, id: \.self) { item in
+                let selected = tab.wrappedValue == item
+                Button { tab.wrappedValue = item } label: {
+                    VStack(spacing: 4) {
+                        Image(systemName: item.symbol).font(.system(size: 17, weight: .regular)).frame(height: 20)
+                        Text(item.rawValue).font(.system(size: 11, weight: .medium))
+                    }
+                    .foregroundStyle(selected ? AppStyle.accent : AppStyle.muted)
+                    .frame(width: 84, height: 50)
+                    .background(selected ? AppStyle.accent.opacity(0.1) : .clear, in: RoundedRectangle(cornerRadius: 8))
+                    .contentShape(Rectangle())
+                }.buttonStyle(.plain).accessibilityAddTraits(selected ? .isSelected : [])
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.top, 34).padding(.bottom, 10)
+    }
+
+    // MARK: General
+
+    @ViewBuilder private var general: some View {
+        SettingsCard("Startup") {
+            SettingsRow("Open at login", detail: ["Enabled", "Not registered"].contains(model.loginStatus) ? "So no meeting slips past while Dreadline is closed." : model.loginStatus) {
+                Toggle("", isOn: Binding(get: { model.loginStatus == "Enabled" }, set: { model.setLogin($0) }))
+                    .toggleStyle(.switch).labelsHidden().controlSize(.small)
+            }
+            SettingsRow("Backup notifications", detail: "A plain notification if Dreadline is closed when a meeting starts.") { switchFor(\.fallback) }
+        }
+        SettingsCard("Quiet hours") {
+            SettingsRow("Pause hauntings every day", detail: "Nothing haunts you between these times.") { switchFor(\.quiet.enabled) }
+            if model.preferences.quiet.enabled {
+                SettingsRow("From") { timePicker(\.quiet.startMinute) }
+                SettingsRow("Until") { timePicker(\.quiet.endMinute) }
+            }
+        }
+        SettingsCard("Privacy") {
+            SettingsRow("Hide meeting titles", detail: "Show \u{201C}Upcoming commitment\u{201D} instead. Useful when sharing your screen.") { switchFor(\.privateTitles) }
+            SettingsRow("Reduce motion", detail: "Calmer animations during a haunting.") { switchFor(\.reducedMotion) }
+        }
+    }
+
+    // MARK: Calendars
+
+    @ViewBuilder private var calendarsTab: some View {
+        SettingsCard("Watched calendars") {
+            if calendars.isEmpty {
+                SettingsRow("No calendars found", detail: model.sourceStatus[.calendar]) { EmptyView() }
+            }
+            ForEach(calendars, id: \.id) { source in
+                let on = model.preferences.selectedCalendars.contains(source.id)
+                // At least one calendar must stay on, or there is nothing to haunt about.
+                let last = on && model.preferences.selectedCalendars.count == 1
+                SettingsRow(source.name, detail: source.provider) {
+                    Toggle("", isOn: Binding(get: { on }, set: { model.setCalendar(source.id, selected: $0) }))
+                        .toggleStyle(.switch).labelsHidden().controlSize(.small).disabled(last)
+                        .help(last ? "Keep at least one calendar on" : "")
+                }
+            }
+        }
+        SettingsCard("Include") {
+            SettingsRow("All-day events") { switchFor(\.includeAllDay) }
+            if model.preferences.includeAllDay {
+                SettingsRow("Remind me about all-day events at") { timePicker(\.allDayMinute) }
+            }
+            SettingsRow("Events marked free") { switchFor(\.includeFree) }
+            SettingsRow("Invitations I haven't answered") { switchFor(\.includeUnanswered) }
+            SettingsRow("Tentative invitations") { switchFor(\.includeTentative) }
+        }
+        SettingsCard("Apple Reminders") {
+            if !model.remindersAccessGranted {
+                SettingsRow("Haunt me about reminders too", detail: "Reminders with a due date, from the lists you pick.") {
+                    Button("Connect") { model.connect(.reminders) }.buttonStyle(HauntedSecondaryStyle(compact: true))
+                }
+            } else {
+                if lists.isEmpty { SettingsRow("No reminder lists found") { EmptyView() } }
+                ForEach(lists, id: \.id) { source in
+                    SettingsRow(source.name, detail: source.provider) {
+                        Toggle("", isOn: Binding(get: { model.preferences.selectedLists.contains(source.id) }, set: { value in
+                            var p = model.preferences
+                            if value { p.selectedLists.insert(source.id) } else { p.selectedLists.remove(source.id) }
+                            model.updatePreferences(p)
+                        })).toggleStyle(.switch).labelsHidden().controlSize(.small)
+                    }
+                }
+                SettingsRow("Time for reminders without one") { timePicker(\.dateOnlyMinute) }
+            }
+        }
+    }
+
+    // MARK: Haunting
+
+    @ViewBuilder private var haunting: some View {
+        SettingsCard("Style") {
+            SettingsRow("Haunting", detail: fullHaunting ? "The ghost clears your screen and takes over when the meeting starts." : "A reminder window appears at the side of your screen.") {
+                Picker("Style", selection: Binding(get: { fullHaunting }, set: { full in
+                    var p = model.preferences
+                    p.fullscreenEnabled = full
+                    p.ceiling = full ? .fullscreen : .prominent
+                    p.poltergeistEnabled = full
+                    if full { p.timing = Timing(gentle: p.timing.gentle > 0 ? p.timing.gentle : 300, prominent: 0, fullscreen: 0) }
+                    model.updatePreferences(p)
+                })) {
+                    Text("Full screen").tag(true)
+                    Text("Side window").tag(false)
+                }.pickerStyle(.segmented).labelsHidden().fixedSize()
+            }
+            if fullHaunting {
+                SettingsRow("Early warning", detail: "When the ghost first shows up.") {
+                    Picker("Early warning", selection: Binding(get: { Int((model.preferences.timing.gentle / 60).rounded()) }, set: { minutes in
+                        var p = model.preferences; p.timing = Timing(gentle: Double(minutes * 60), prominent: 0, fullscreen: 0); model.updatePreferences(p)
+                    })) {
+                        Text("2 min").tag(2); Text("5 min").tag(5); Text("10 min").tag(10)
+                    }.pickerStyle(.segmented).labelsHidden().fixedSize()
+                }
+            }
+            SettingsRow("Snooze for") {
+                Stepper("\(model.preferences.snoozeMinutes) min", value: preference(\.snoozeMinutes), in: 1...60).monospacedDigit()
+            }
+        }
+        SettingsCard("Sound") {
+            SettingsRow("Sound effects") { switchFor(\.sound) }
+            if model.preferences.sound {
+                SettingsRow("Scare level", detail: scareMeterCaption) {
+                    Picker("Scare level", selection: Binding(get: { model.preferences.scareLevel ?? .medium }, set: { level in
+                        var p = model.preferences; p.scareLevel = level; model.updatePreferences(p)
+                    })) {
+                        ForEach(ScareLevel.allCases, id: \.self) { Text($0.title).tag($0) }
+                    }.pickerStyle(.segmented).labelsHidden().fixedSize()
+                }
+                SettingsRow("Volume") {
+                    HStack(spacing: 8) {
+                        Image(systemName: "speaker.fill").font(.caption).foregroundStyle(AppStyle.muted)
+                        Slider(value: preference(\.volume), in: 0...1).frame(width: 150)
+                        Image(systemName: "speaker.wave.3.fill").font(.caption).foregroundStyle(AppStyle.muted)
+                    }
+                }
+            }
+        }
+        if showsTest {
+            SettingsCard("Try it") {
+                SettingsRow("Test haunting", detail: model.demoActive ? "Press Esc to stop." : "Plays a sample haunting with these settings. Nothing is joined or changed.") {
+                    if model.demoActive {
+                        Button("Stop") { model.endDemo() }.buttonStyle(HauntedSecondaryStyle(compact: true))
+                    } else {
+                        Button { model.testHaunting() } label: { Label("Play", systemImage: "play.fill") }
+                            .buttonStyle(HauntedPrimaryStyle(compact: true))
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: Advanced
+
+    @ViewBuilder private var advanced: some View {
+        SettingsCard("Permissions") {
+            permissionRow("Calendar", granted: model.calendarAccessGranted)
+            permissionRow("Window control", granted: model.accessibilityTrusted)
+            permissionRow("Notifications", granted: model.notificationsGranted)
+        }
+        if model.preferences.poltergeistEnabled != true {
+            SettingsCard("Displays") {
+                SettingsRow("Dim other displays", detail: "Darken every screen during a reminder, not just the main one.") { switchFor(\.dimAllDisplays) }
+            }
+        }
+        SettingsCard("Data") {
+            SettingsRow("Keep history for") {
+                Stepper("\(model.preferences.retentionDays) days", value: preference(\.retentionDays), in: 1...365).monospacedDigit()
+            }
+            SettingsRow("Diagnostics", detail: "A redacted log for troubleshooting.") {
+                Button("Open…") { diagnostics = true }.buttonStyle(HauntedSecondaryStyle(compact: true))
+            }
+            SettingsRow("Reset local data", detail: "Removes reminders, activity and preferences.") {
+                Button("Reset…", role: .destructive) { resetPrompt = true }
+                    .buttonStyle(HauntedSecondaryStyle(compact: true)).foregroundStyle(AppStyle.blood)
+            }
+        }
+        VStack(alignment: .leading, spacing: 6) {
+            if let error = model.error { Text(error).font(.caption).foregroundStyle(AppStyle.blood).textSelection(.enabled) }
+            Text("Changes save automatically · Everything stays on your Mac").font(.caption).foregroundStyle(AppStyle.muted)
+        }.padding(.leading, 2)
+    }
+
+    private func permissionRow(_ title: String, granted: Bool) -> some View {
+        SettingsRow(title) {
+            Label(granted ? "Allowed" : "Needed", systemImage: granted ? "checkmark.circle.fill" : "exclamationmark.circle")
+                .font(.caption.weight(.medium)).foregroundStyle(granted ? AppStyle.accent : AppStyle.blood)
+        }
+    }
+
+    // MARK: Controls
+
+    private func switchFor(_ key: WritableKeyPath<Preferences, Bool>) -> some View {
+        Toggle("", isOn: preference(key)).toggleStyle(.switch).labelsHidden().controlSize(.small)
+    }
+    /// A time-of-day picker backed by minutes since midnight.
+    private func timePicker(_ key: WritableKeyPath<Preferences, Int>) -> some View {
+        DatePicker("", selection: Binding(get: {
+            let minutes = model.preferences[keyPath: key]
+            return Calendar.current.date(bySettingHour: minutes / 60, minute: minutes % 60, second: 0, of: Date()) ?? Date()
+        }, set: { date in
+            let c = Calendar.current.dateComponents([.hour, .minute], from: date)
+            var p = model.preferences; p[keyPath: key] = (c.hour ?? 0) * 60 + (c.minute ?? 0); model.updatePreferences(p)
+        }), displayedComponents: .hourAndMinute).datePickerStyle(.field).labelsHidden()
     }
 }
-struct MinuteControl: View {
+
+// MARK: - Building blocks
+
+private struct SettingsCard<Content: View>: View {
     let title: String
-    @Binding var minute: Int
+    @ViewBuilder var content: Content
+    init(_ title: String, @ViewBuilder content: () -> Content) { self.title = title; self.content = content() }
     var body: some View {
-        HStack {
-            Text(title)
-            Picker("Hour", selection: Binding(get: { minute / 60 }, set: { minute = $0 * 60 + minute % 60 })) { ForEach(0..<24, id: \.self) { Text(String(format: "%02d", $0)).tag($0) } }.frame(width: 110)
-            Picker("Minute", selection: Binding(get: { minute % 60 }, set: { minute = (minute / 60) * 60 + $0 })) { ForEach(0..<60, id: \.self) { Text(String(format: "%02d", $0)).tag($0) } }.frame(width: 110)
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title.uppercased()).font(AppStyle.signal(10)).tracking(1.4).foregroundStyle(AppStyle.muted).padding(.leading, 2)
+            // Rows draw a hairline on top; shifting up one point hides the first one under the clip.
+            VStack(spacing: 0) { content }
+                .padding(.top, -1)
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+            .background(AppStyle.card, in: RoundedRectangle(cornerRadius: 10))
+            .overlay(RoundedRectangle(cornerRadius: 10).stroke(AppStyle.border, lineWidth: 1))
         }
     }
 }
-struct SourceSettings: View {
-    @ObservedObject var model: AppModel
-    private func selection(_ source: SourceSnapshot) -> Binding<Bool> {
-        Binding(get: { source.kind == .calendar ? model.preferences.selectedCalendars.contains(source.id) : model.preferences.selectedLists.contains(source.id) }, set: { value in
-            var p = model.preferences
-            if source.kind == .calendar { if value { p.selectedCalendars.insert(source.id) } else { p.selectedCalendars.remove(source.id) } }
-            else { if value { p.selectedLists.insert(source.id) } else { p.selectedLists.remove(source.id) } }
-            model.updatePreferences(p)
-        })
+
+private struct SettingsRow<Trailing: View>: View {
+    let title: String
+    let detail: String?
+    @ViewBuilder var trailing: Trailing
+    init(_ title: String, detail: String? = nil, @ViewBuilder trailing: () -> Trailing) {
+        self.title = title; self.detail = detail; self.trailing = trailing()
     }
     var body: some View {
-        Form {
-            ForEach([SourceKind.calendar, .reminders], id: \.self) { kind in
-                Section(kind == .calendar ? "Calendars — read only" : "Apple Reminders — completion requires Done") {
-                    Text("Authorization: \(model.authorizationDescription(kind))").font(.caption)
-                    Text(model.sourceStatus[kind] ?? "Unavailable").font(.caption).textSelection(.enabled)
-                    Button(kind == .calendar ? "Connect calendars" : "Connect Apple Reminders") { model.connect(kind) }
-                    ForEach(model.sources.filter { $0.kind == kind }, id: \.id) { source in
-                        Toggle("\(source.provider) · \(source.name)\(source.writable ? "" : " (read only)")", isOn: selection(source))
-                    }
-                    if model.sources.filter({ $0.kind == kind }).isEmpty { Text("No available sources. Access denial does not affect local reminders.").foregroundStyle(.secondary) }
-                }
+        HStack(alignment: .center, spacing: 16) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(.system(size: 13)).foregroundStyle(AppStyle.ink)
+                if let detail, !detail.isEmpty { Text(detail).font(.caption).foregroundStyle(AppStyle.muted).fixedSize(horizontal: false, vertical: true) }
             }
-            Section("Calendar filtering") {
-                prefToggle("Include all-day events", \.includeAllDay)
-                MinuteControl(title: "All-day reminder time", minute: prefMinute(\.allDayMinute))
-                MinuteControl(title: "Date-only task time", minute: prefMinute(\.dateOnlyMinute))
-                prefToggle("Include free/available events", \.includeFree)
-                prefToggle("Include unanswered invitations", \.includeUnanswered)
-                prefToggle("Include tentative invitations", \.includeTentative)
-            }
-            Text("Calendars require full EventKit permission even for read-only access. Only calendars synced into macOS are available; Dreadline does not connect directly to Google, Exchange, or iCloud. Declined and cancelled events are excluded. No sources are selected automatically.").font(.caption)
-            Button("Refresh sources") { Task { await model.refresh(catchUp: false) } }
-        }.formStyle(.grouped)
-    }
-    func prefToggle(_ title: String, _ key: WritableKeyPath<Preferences, Bool>) -> some View {
-        Toggle(title, isOn: Binding(get: { model.preferences[keyPath: key] }, set: { var p = model.preferences; p[keyPath: key] = $0; model.updatePreferences(p) }))
-    }
-    func prefMinute(_ key: WritableKeyPath<Preferences, Int>) -> Binding<Int> {
-        Binding(get: { model.preferences[keyPath: key] }, set: { var p = model.preferences; p[keyPath: key] = $0; model.updatePreferences(p) })
+            Spacer(minLength: 12)
+            trailing
+        }
+        .padding(.horizontal, 14).padding(.vertical, 10)
+        .frame(minHeight: 42)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .overlay(alignment: .top) { AppStyle.border.frame(height: 1) }
     }
 }
+
 struct DiagnosticsView: View {
     @ObservedObject var model: AppModel
     var body: some View {
         Form {
             Section("Delivery") {
+                LabeledContent("Window control", value: model.windowControlStatus)
+                LabeledContent("Overlay", value: model.overlayStatus)
                 LabeledContent("Storage", value: model.storageFailed ? "Unavailable — recovery required" : "Ready")
                 LabeledContent("Next deadline", value: model.nextAction?.formatted() ?? "None")
                 LabeledContent("Pause", value: model.db.paused ? (model.db.pauseUntil?.formatted() ?? "Manual") : "Off")
@@ -162,6 +352,6 @@ struct DiagnosticsView: View {
                 Button("Export redacted diagnostics") { model.exportDiagnostics() }
             }
             Text("Public workspace lifecycle signals are used conservatively; session-active is not an unlock notification. Real overlays remain redacted and nonactivating. Delivery is unavailable while sleeping, shut down, quit, or permission/source validation is missing.").font(.caption)
-        }.formStyle(.grouped)
+        }.formStyle(.grouped).scrollContentBackground(.hidden).background(AppStyle.canvas)
     }
 }

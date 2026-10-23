@@ -4,18 +4,36 @@ import AppKit
 @main
 struct DreadlineApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
-    @StateObject private var model = AppModel()
     var body: some Scene {
-        Window("Dreadline", id: "main") { MainView(model: model).onAppear { delegate.model = model } }
-            .defaultSize(width: 1060, height: 720)
-        MenuBarExtra { MenuView(model: model) } label: { Label(model.menuTitle, systemImage: model.db.paused ? "bell.slash" : "bell.badge") }
-            .menuBarExtraStyle(.window)
-        Settings { SettingsView(model: model).frame(width: 720, height: 650) }
+        Settings { EmptyView() }
+            .commands {
+                CommandGroup(replacing: .appSettings) {
+                    Button("Settings…") { delegate.menu?.openSettings() }
+                        .keyboardShortcut(",", modifiers: .command)
+                }
+            }
     }
+
 }
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    weak var model: AppModel?
+    private(set) var model: AppModel?
+    private(set) var menu: MenuBarController?
+    private var duplicate = false
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // A second copy hands off to the running one and never opens the database.
+        guard !duplicate else { return }
+        let model = AppModel()
+        self.model = model
+        menu = MenuBarController(model: model)
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        menu?.show()
+        return false
+    }
+
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard let model, !model.quitting else { return .terminateNow }
         var keep = false
@@ -35,8 +53,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillFinishLaunching(_ notification: Notification) {
+        NSApp.appearance = NSAppearance(named: .darkAqua)
         let others = NSRunningApplication.runningApplications(withBundleIdentifier: Bundle.main.bundleIdentifier ?? "xyz.dreadline.app").filter { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier }
-        if let existing = others.first { existing.activate(options: []); NSApp.terminate(nil) }
+        if let existing = others.first { duplicate = true; existing.activate(options: []); NSApp.terminate(nil) }
     }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 }

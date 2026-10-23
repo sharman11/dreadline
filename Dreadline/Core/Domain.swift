@@ -37,9 +37,13 @@ struct Preferences: Codable, Sendable, Equatable {
     var selectedCalendars: Set<String> = []
     var selectedLists: Set<String> = []
     var alertsEnabled = false
-    var ceiling: Intensity = .prominent
-    var fullscreenEnabled = false
-    var timing = Timing()
+    var ceiling: Intensity = .fullscreen
+    var fullscreenEnabled = true
+    var timing = Timing(gentle: 300, prominent: 0, fullscreen: 0)
+    // Optional fields decode older saved preferences without a schema reset.
+    var poltergeistEnabled: Bool? = true
+    /// nil (older saves) means Medium.
+    var scareLevel: ScareLevel?
     var grace: Double = 900
     var taskWindow: Double = 900
     var snoozeMinutes = 5
@@ -96,7 +100,7 @@ struct LocalReminder: Codable, Sendable, Identifiable, Equatable {
     var url = ""
     var due: Date
     var recurrence = Recurrence()
-    var intensity: Intensity = .prominent
+    var intensity: Intensity = .fullscreen
     var sound = false
     var snoozeMinutes = 5
 }
@@ -127,6 +131,12 @@ struct Occurrence: Codable, Sendable, Identifiable, Equatable {
     var updated = Date()
     var outcome: String?
     var resolvedAt: Date?
+    var preludeShownFor: Date?
+    var preludeUntil: Date?
+    var arrivalShownFor: Date?
+    var arrivalUntil: Date?
+    var dashShownFor: Date?
+    var dashUntil: Date?
     func expiry(_ prefs: Preferences) -> Date? {
         guard let due else { return nil }
         if kind != .calendar { return max(due.addingTimeInterval(prefs.taskWindow), deliveryWindowEnd ?? .distantPast) }
@@ -135,6 +145,50 @@ struct Occurrence: Codable, Sendable, Identifiable, Equatable {
         return min(end, grace)
     }
     func firstAlert(_ prefs: Preferences) -> Date? { due?.addingTimeInterval(-(timing ?? prefs.timing).gentle) }
+}
+/// Bundled haunting sounds (.m4a), named for what they are.
+enum HauntSound: String, CaseIterable {
+    case basement = "haunt-basement"
+    case shatter = "haunt-shatter"
+    case scream = "haunt-scream"
+    case deep = "haunt-deep"
+    var url: URL? { Bundle.main.url(forResource: rawValue, withExtension: "m4a") }
+}
+/// How hard the meeting-time jump scare hits (Settings → Alerts → Scare meter).
+enum ScareLevel: Int, Codable, Sendable, CaseIterable, Comparable {
+    case low, medium, high
+    static func < (lhs: Self, rhs: Self) -> Bool { lhs.rawValue < rhs.rawValue }
+    var title: String { ["Low", "Medium", "High"][rawValue] }
+}
+/// Which sound plays at each moment. Tests play the same scare as a real meeting, so what you hear is what you get.
+enum HauntSounds {
+    static let earlyWarning = HauntSound.basement
+    static let snooze = HauntSound.basement
+    static let dismiss = HauntSound.shatter
+    static let sideReminder = HauntSound.basement
+    static func scare(_ level: ScareLevel) -> HauntSound {
+        switch level {
+        case .low: return .shatter
+        case .medium: return .scream
+        case .high: return .deep
+        }
+    }
+    static func previews(_ level: ScareLevel) -> [(title: String, sound: HauntSound)] {
+        [("Early warning", earlyWarning), ("Meeting scare", scare(level)), ("Snooze", snooze), ("Dismiss", dismiss)]
+    }
+}
+/// Poltergeist timing shared by the scheduler and the fullscreen scene.
+enum Haunt {
+    /// The ghost dashes across the screen this long before the early warning.
+    static let dashLead: TimeInterval = 10
+    /// Upper bound for the dash on screen.
+    static let dashSeconds: TimeInterval = 2
+    /// Upper bound for the early-warning glimpse (minimize → peek → restore).
+    static let preludeSeconds: TimeInterval = 6
+    /// The meeting-time scare starts this long before the start so the card lands on time.
+    static let arrivalLead: TimeInterval = 5
+    /// How long the fullscreen meeting card stays before settling into a side reminder.
+    static let arrivalSeconds: TimeInterval = 30
 }
 struct Diagnostic: Codable, Sendable, Equatable { var date: Date; var category: String }
 struct Database: Codable, Sendable, Equatable {
@@ -169,7 +223,9 @@ enum DomainError: LocalizedError {
     var errorDescription: String? { if case .invalid(let message) = self { return message }; return nil }
 }
 protocol Clock { var now: Date { get }; var uptime: TimeInterval { get } }
-struct SystemClock: Clock { var now: Date { Date() }; var uptime: TimeInterval { ProcessInfo.processInfo.systemUptime } }
+// `uptime` keeps counting while the Mac sleeps (unlike ProcessInfo.systemUptime) and ignores
+// wall-clock changes, so a running snooze ends on time after the lid has been closed.
+struct SystemClock: Clock { var now: Date { Date() }; var uptime: TimeInterval { Double(clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW)) / 1_000_000_000 } }
 protocol StateStore { func load() throws -> Database; func save(_ database: Database) throws }
 
 // History payloads are pruned without forgetting a still-fetched occurrence's delivery state.

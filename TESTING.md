@@ -1,5 +1,31 @@
 # Testing
 
+## Setup gate, single test button and settings redesign — 2026-10-23
+
+- Debug build succeeded. All 102 tests passed with zero failures. The setup test now also requires notification permission and checks the "Finish setup" menu title; native checks cover the 360-point self-sizing popover and the 560 × 580 tabbed Settings window.
+- `UISnapshotTests` renders the menu (with and without meetings), each Settings tab and onboarding to PNGs when `TEST_RUNNER_SNAPSHOT_DIR` is set; it is skipped otherwise. All renders were visually inspected. Ghost artwork does not load in the test bundle, so it is blank there.
+- Not yet verified live: the real calendar and notification prompts, and the popover against an actual calendar.
+
+## Menu usability revision — 2026-10-23
+
+- Debug build succeeded. All 74 tests passed with zero failures. Native checks cover the compact popover dimensions, entering/leaving the inline editor without model-driven dismissal, direct Alerts routing and Settings window reuse. A new integration case verifies completed one-time reminders leave the active list while repeating reminders retain a next occurrence and History remains available.
+- Visually inspected the compact home, fixed navigation, reminder form, Alerts shortcut and calendar setup. Entered a draft title and verified Create became enabled; cancelled it without saving. Confirmed the completed smoke-test item no longer appears as an active reminder.
+- No calendar access was requested, alert preferences enabled, or source records changed. Final app was left running in the menu bar.
+
+## Menu-bar home — 2026-10-23
+
+- Final Debug build succeeded. All 73 tests passed with zero failures, including new native checks for notification/alert routing to the popover, non-detachable presentation, Settings sizing and window reuse.
+- Visually inspected the full agenda inside the status-item popover, opened History there, and opened/cancelled the inline reminder editor without saving.
+- Opened the separate Settings window from the gear and verified its 720 × 650 content and dark controls. Closing Settings left no standalone window; reopening the app returned to the popover.
+- Calendar permissions and source records were untouched. Existing fullscreen alerts remain separate interruption surfaces.
+
+## Dark Halloween UI — 2026-10-23
+
+- Debug build succeeded; existing XCTest suite passed all 71 tests with zero failures.
+- Visually inspected the running main agenda, Calendars and Alerts settings, and the local reminder sheet through native UI automation. Dark title bars, surfaces, grouped forms, spectral artwork, orange actions and readable text were present.
+- Opened and cancelled the reminder editor without saving. Started the meeting alert preview and ended it with the main-window End preview action. No calendar permissions were requested or source data modified.
+- The automation screenshot surface selected the main window rather than the borderless fullscreen alert. Fullscreen artwork composition still requires a direct manual visual check; native panel geometry and Escape behavior are covered by the existing tests.
+
 ## Reproduce
 
 ```sh
@@ -69,3 +95,58 @@ Use a consistently signed development build installed at a stable path. Create i
 ## Results
 
 See BUILD_STATUS.md for the final run count and artifact location. Earlier failing iterations were fixed and rerun; their logs do not imply a passing final run. Build/test logs and `.xcresult` bundles stay local under `build/` (with summary copies) or `/tmp/dreadline-*.log` during development.
+
+## Simplified UX pass — 2026-10-22
+
+- Universal Debug build passed after the UI redesign.
+- Existing automated test suite passed.
+- Running-app inspection verified the Up next empty/setup state, calendar settings, Alerts controls, preview launch, preview dismissal, and return to home. Home and Alerts layout were visually inspected.
+- No calendar permission was granted or user preferences changed during inspection.
+- Floating overlay geometry, populated meeting cards, menu-bar interactions, and live meeting-link handoff still require manual acceptance checks.
+
+## Haunted visual theme — 2026-10-22
+
+- Universal Debug build passed with the bundled original corridor artwork.
+- All 39 existing tests passed; the final follow-up changed only form backgrounds, toolbar styling and layout dimensions and was rebuilt successfully.
+- Visually inspected the haunted home/setup state, final dark calendar and alert settings, and the fullscreen scene on the available display.
+- Verified fullscreen preview starts and Escape dismisses it. Side-window preview launch state was verified; its nonactivating panel was not available in the screenshot surface.
+- No live calendar sources, permissions, or saved user preferences were changed during theme inspection.
+- Smaller-screen sizing is adaptive in code; additional physical displays, populated calendar cards, and menu-bar layout still need manual acceptance checks.
+- Creative research and asset-generation prompt are recorded in `design/HAUNTED-THEME.md`.
+
+## Crooked Storybook / Poltergeist completion — 2026-10-22
+
+- Full suite: 54 tests passed, 0 failures, including 11 haunting scheduler tests, 11 model integration tests and 2 native presentation smoke tests.
+- Native tests instantiate the real OverlayCoordinator and verify a visible panel matching an available screen rectangle, a matching hosting-view size, Escape cancellation, and automatic prelude closure after four seconds. No sources are connected and no external window state is changed by these tests.
+- NSHostingView sizing options now leave explicit panel geometry authoritative, avoiding intrinsic GeometryReader sizing for borderless fullscreen windows. Diagnostics reports presentation type, size and visibility.
+- The Crooked Storybook main window was visually inspected. The computer-use capture continues to select the main app window during preview, so the final apparition's visual composition and real cross-app keyboard focus are not claimed as visually certified.
+- Screen-sharing behavior, full-screen apps/Spaces, multiple monitors, mirrored displays, hot-plug, lock/unlock, and perception/volume of the original sound remain in the manual acceptance matrix.
+- Full behavior, edge cases, generated ghost prompt and original sound provenance: `design/POLTERGEIST-SEQUENCE.md`.
+
+## Knock/choreography pass — 2026-10-23
+
+- All 57 tests passed, with zero failures. Native tests additionally cover Escape during an animated release, a newer presentation surviving an older close callback, and a watchdog releasing the latest queue after source/model updates.
+- Verified the user-supplied MP3 is readable by Core Audio and bundled byte-for-byte without conversion; its metadata is 0.936 seconds, mono, 48 kHz.
+- Updated normal release animations are cancellation-aware. Escape/Pause retain the immediate close path. Entrance-hidden controls do not accept clicks and are excluded from accessibility until revealed.
+- Visual choreography, perceived sound level and multi-display/Spaces presentation still need direct human acceptance; automated assertions establish lifecycle/cleanup, not the subjective scare effect.
+
+## Actual minimize/restore — 2026-10-23
+
+- Final build/test run passed all 64 tests with zero failures, including seven isolated WorkspaceMinimizer tests.
+- Tests cover minimizing supported open windows, preserving already-minimized windows, permission denial/revocation, closed windows, failed restore retry, preventing new ownership from overwriting failed restores, and repeated restore cleanup.
+- Native presentation smoke tests explicitly inject fake window access; no real third-party windows were minimized by tests and no Accessibility permission was granted by automation.
+- Verified the built app's entitlements omit com.apple.security.app-sandbox. Release hardened runtime remains enabled. Live acceptance requires enabling Accessibility for the rebuilt Dreadline app and previewing both stages.
+- Escape, Pause, normal release, Quit and the bounded automatic release use restore. A menu-bar emergency Restore minimized windows control and a Settings retry are available. Crash/Force Quit cannot run cleanup and may require manual Dock restoration.
+
+## Poltergeist horror pass — 2026-10-23
+
+- All 69 tests passed with zero failures.
+- Added tests for three-wave window minimization, early restoration canceling unstarted waves, canceled choreography not firing later window callbacks, reduced motion skipping the close-up, and the single close-up handing back to controls.
+- User-supplied knocking MP3 remains bundled. The arrival close-up is a new original derived character asset; generation prompt and behavior notes are in design/POLTERGEIST-HORROR-PASS.md.
+- Actual third-party window control is still tested through isolated fakes. The final scare and audio balance require direct visual/listening acceptance on the user's Mac with Accessibility granted.
+
+## Animation cleanup — 2026-10-23
+
+- All 71 tests passed with zero failures after consolidating sound/window/restore cues into one scene timeline.
+- Added tests verify warning cue order, restoration before visual reveal, and cancellation preventing stale restoration callbacks.
+- Full-screen shaking was removed; scratch drawing, pose changes, close-up fade, card entrance and the paper edge were smoothed. Existing native panel lifecycle and minimize/restore tests pass.

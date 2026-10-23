@@ -14,11 +14,13 @@ final class EventKitAdapter: SourceAdapter {
     func status(_ kind: SourceKind) -> EKAuthorizationStatus { EKEventStore.authorizationStatus(for: kind == .calendar ? .event : .reminder) }
     func request(_ kind: SourceKind) async throws -> Bool {
         if status(kind) != .notDetermined { return status(kind) == .fullAccess }
-        return try await (kind == .calendar ? store.requestFullAccessToEvents() : store.requestFullAccessToReminders())
+        let granted = try await (kind == .calendar ? store.requestFullAccessToEvents() : store.requestFullAccessToReminders())
+        if granted { store.reset() }
+        return granted
     }
     func fetch(kind: SourceKind, preferences p: Preferences, now: Date) async throws -> SourceResult {
         guard status(kind) == .fullAccess else { throw DomainError.invalid("\(kind == .calendar ? "Calendar" : "Reminders") permission unavailable. Local reminders still work. Connect in Settings or review System Settings → Privacy & Security.") }
-        let store = EKEventStore()
+        let store = self.store
         let calendars = store.calendars(for: kind == .calendar ? .event : .reminder)
         let sources = calendars.map { SourceSnapshot(id: $0.calendarIdentifier, accountID: $0.source.sourceIdentifier, name: $0.title, provider: $0.source.title, kind: kind, writable: $0.allowsContentModifications) }
         let selected = kind == .calendar ? p.selectedCalendars : p.selectedLists
@@ -45,7 +47,7 @@ final class EventKitAdapter: SourceAdapter {
                     let cal = Calendar.current
                     due = WallClock.time(on: start, minute: p.allDayMinute, calendar: cal) ?? start
                 }
-                let calendar = event.calendar!
+                guard let calendar = event.calendar else { continue }
                 let links = SafeLinks.extract(structured: event.url?.absoluteString, notes: event.notes)
                 items.append(Occurrence(kind: .calendar, sourceID: calendar.calendarIdentifier,
                     accountID: calendar.source.sourceIdentifier, sourceName: "\(calendar.source.title) · \(calendar.title)",
@@ -57,12 +59,13 @@ final class EventKitAdapter: SourceAdapter {
         } else {
             let predicate = store.predicateForIncompleteReminders(withDueDateStarting: nil, ending: nil, calendars: enabled)
             let snapshots: [Occurrence] = try await withCheckedThrowingContinuation { continuation in
-                store.fetchReminders(matching: predicate) { reminders in
+                // EventKit calls back on a background queue; @Sendable keeps the closure off the main actor.
+                store.fetchReminders(matching: predicate) { @Sendable reminders in
                     guard let reminders else {
                         continuation.resume(throwing: DomainError.invalid("Reminders refresh failed. Existing state preserved; delivery suspended until retry."))
                         return
                     }
-                    let snapshots = reminders.filter { !$0.isCompleted }.map { Self.snapshot($0, preferences: p) }
+                    let snapshots = reminders.filter { !$0.isCompleted }.compactMap { Self.snapshot($0, preferences: p) }
                     continuation.resume(returning: snapshots)
                 }
             }
@@ -71,8 +74,8 @@ final class EventKitAdapter: SourceAdapter {
         }
         return SourceResult(kind: kind, sources: sources, items: items)
     }
-    nonisolated private static func snapshot(_ reminder: EKReminder, preferences p: Preferences) -> Occurrence {
-                let calendar = reminder.calendar!
+    nonisolated private static func snapshot(_ reminder: EKReminder, preferences p: Preferences) -> Occurrence? {
+                guard let calendar = reminder.calendar else { return nil }
                 let due = WallClock.reminderDue(reminder.dueDateComponents, dateOnlyMinute: p.dateOnlyMinute)
                 return Occurrence(kind: .reminders, sourceID: calendar.calendarIdentifier,
                     accountID: calendar.source.sourceIdentifier, sourceName: "\(calendar.source.title) · \(calendar.title)",
@@ -84,8 +87,9 @@ final class EventKitAdapter: SourceAdapter {
     func complete(_ item: Occurrence) throws {
         guard item.kind == .reminders, status(.reminders) == .fullAccess,
               let reminder = store.calendarItem(withIdentifier: item.providerID) as? EKReminder,
-              reminder.calendar.calendarIdentifier == item.sourceID,
-              reminder.calendar.allowsContentModifications else { throw DomainError.invalid("Source reminder is unavailable or read-only. Retry refresh or acknowledge locally.") }
+              let calendar = reminder.calendar,
+              calendar.calendarIdentifier == item.sourceID,
+              calendar.allowsContentModifications else { throw DomainError.invalid("Source reminder is unavailable or read-only. Retry refresh or acknowledge locally.") }
         guard !reminder.hasRecurrenceRules else { throw DomainError.invalid("Recurring Apple Reminders completion is disabled: provider recurrence behavior has not been manually verified. Use Acknowledge locally or complete it in Reminders.") }
         if reminder.isCompleted { return }
         reminder.isCompleted = true

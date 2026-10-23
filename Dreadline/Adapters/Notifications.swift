@@ -21,7 +21,7 @@ final class NotificationAdapter: NSObject, NotificationSink, UNUserNotificationC
         center.delegate = self
         let category = UNNotificationCategory(identifier: "REMINDER", actions: [
             UNNotificationAction(identifier: "ACK", title: "Acknowledge", options: .foreground),
-            UNNotificationAction(identifier: "SNOOZE", title: "Snooze 5 minutes", options: .foreground)
+            UNNotificationAction(identifier: "SNOOZE", title: "Snooze", options: .foreground)
         ], intentIdentifiers: [], options: [])
         center.setNotificationCategories([category])
     }
@@ -36,7 +36,7 @@ final class NotificationAdapter: NSObject, NotificationSink, UNUserNotificationC
         @unknown default: return "Unknown"
         }
     }
-    func cancel() { generation += 1; activeTask?.cancel(); center.removeAllPendingNotificationRequests(); center.removeAllDeliveredNotifications() }
+    func cancel() { generation += 1; activeTask?.cancel(); center.removeAllPendingNotificationRequests() }
     func reconcile(_ db: Database, now: Date) async {
         let previous = activeTask
         cancel()
@@ -46,10 +46,27 @@ final class NotificationAdapter: NSObject, NotificationSink, UNUserNotificationC
             guard let self, !Task.isCancelled, current == self.generation else { return }
             self.center.removeAllPendingNotificationRequests()
             await self.schedule(db, now: now, generation: current)
+            await self.pruneDelivered(db, generation: current)
         }
         activeTask = work
         await work.value
         if current == generation { activeTask = nil }
+    }
+    private func pruneDelivered(_ db: Database, generation current: Int) async {
+        let live: Set<String> = db.preferences.fallback && db.preferences.alertsEnabled && !db.paused
+            ? Set(db.occurrences.filter { !$0.state.terminal }.map(\.id.uuidString)) : []
+        let delivered = await Self.deliveredIdentifiers()
+        guard !Task.isCancelled, current == generation else { return }
+        let stale = delivered.filter { $0.occurrence.map { !live.contains($0) } ?? true }.map(\.id)
+        if !stale.isEmpty { center.removeDeliveredNotifications(withIdentifiers: stale) }
+    }
+    /// The completion handler runs on a background queue, so it is formed outside the main actor.
+    nonisolated private static func deliveredIdentifiers() async -> [(id: String, occurrence: String?)] {
+        await withCheckedContinuation { continuation in
+            UNUserNotificationCenter.current().getDeliveredNotifications { notifications in
+                continuation.resume(returning: notifications.map { ($0.request.identifier, $0.request.content.userInfo["occurrence"] as? String) })
+            }
+        }
     }
     private func schedule(_ db: Database, now: Date, generation current: Int) async {
         guard db.preferences.fallback, db.preferences.alertsEnabled, !db.paused else { return }
